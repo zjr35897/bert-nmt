@@ -192,6 +192,10 @@ class TransformerS2Model(FairseqEncoderDecoderModel):
 
     def __init__(self, encoder, decoder, bertencoder, berttokenizer, mask_cls_sep=False, args=None):
         super().__init__(encoder, decoder, bertencoder, berttokenizer, mask_cls_sep, args)
+        # self.self_attens = MultiheadAttention(
+        #     args.bert_out_dim, args.encoder_attention_heads,
+        #     dropout=args.attention_dropout, self_attention=True
+        # )
 
     @staticmethod
     def add_args(parser):
@@ -342,11 +346,17 @@ class TransformerS2Model(FairseqEncoderDecoderModel):
             bert_encoder_padding_mask += bert_input.eq(self.berttokenizer.cls())
             bert_encoder_padding_mask += bert_input.eq(self.berttokenizer.sep())
         bert_encoder_out = bert_encoder_out.permute(1,0,2).contiguous()
+        # bert_encoder_out_2, _ = self.self_attens(query=bert_encoder_out, key=bert_encoder_out,value=bert_encoder_out,key_padding_mask=bert_encoder_padding_mask)
+        # bert_encoder_out_2 = F.linear(bert_encoder_out,self.trans_weight, self.trans_bias)
         bert_encoder_out = {
             'bert_encoder_out': bert_encoder_out,
             'bert_encoder_padding_mask': bert_encoder_padding_mask,
         }
         encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, bert_encoder_out=bert_encoder_out)
+        # g1 = F.linear(bert_encoder_out_2,self.w)
+        # g2 = F.linear(encoder_out['encoder_out'], self.u)
+        # g  = torch.sigmoid(g1+g2+self.b)
+        # encoder_out['encoder_out'] = torch.mul(g,bert_encoder_out_2)+torch.mul((1.-g),encoder_out['encoder_out'])
         decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, bert_encoder_out=bert_encoder_out, **kwargs)
         return decoder_out
 
@@ -1290,6 +1300,10 @@ class TransformerS2EncoderLayer(nn.Module):
         #     self.embed_dim*2, args.encoder_attention_heads,
         #     dropout=args.attention_dropout, self_attention=True
         # )
+        self.w = nn.Parameter(torch.Tensor(self.embed_dim, self.embed_dim))
+        self.u = nn.Parameter(torch.Tensor(self.embed_dim, self.embed_dim))
+        self.b = nn.Parameter(torch.Tensor(self.embed_dim))
+        self.reset_parameters()
         self.fc_d = Linear(self.embed_dim*2,self.embed_dim)
         bert_out_dim = args.bert_out_dim
         self.bert_attn = MultiheadAttention(
@@ -1322,6 +1336,13 @@ class TransformerS2EncoderLayer(nn.Module):
             self.bert_ratio = 0.
             self.encoder_bert_dropout = False
             self.encoder_bert_mixup = False
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.w)
+        nn.init.xavier_uniform_(self.u)
+        tmp = torch.Tensor(1,self.embed_dim)
+        nn.init.xavier_normal_(tmp)
+        self.b.data = tmp.squeeze(0)
 
     def upgrade_state_dict_named(self, state_dict, name):
         """
@@ -1359,12 +1380,16 @@ class TransformerS2EncoderLayer(nn.Module):
         x1 = F.dropout(x1, p=self.dropout, training=self.training)
         x2 = F.dropout(x2, p=self.dropout, training=self.training)
         #new concact
-        x3 = torch.cat((x1,x2),2)
+        #x3 = torch.cat((x1,x2),2)
         #x3, _ = self.self_attn_2(query=x3, key=x3, value=x3)
-        x3 = self.activation_fn(self.fc_d(x3))
-        x3 = F.dropout(x3, p=self.activation_dropout, training=self.training)
+        #x3 = self.activation_fn(self.fc_d(x3))
+        #x3 = F.dropout(x3, p=self.activation_dropout, training=self.training)
         #ratios = self.get_ratio()
         #x = residual + ratios[0] * x1 + ratios[1] * x2
+        g1 = F.linear(x1,self.w)
+        g2 = F.linear(x2, self.u)
+        g  = torch.sigmoid(g1+g2+self.b)
+        x3 = torch.mul(g,x1)+torch.mul((1.-g),x2)
         x = residual + x3
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
 
@@ -1436,6 +1461,10 @@ class TransformerDecoderLayer(nn.Module):
             # for backwards compatibility with models that use args.relu_dropout
             self.activation_dropout = getattr(args, 'relu_dropout', 0)
         self.normalize_before = args.decoder_normalize_before
+        self.w = nn.Parameter(torch.Tensor(self.embed_dim, self.embed_dim))
+        self.u = nn.Parameter(torch.Tensor(self.embed_dim, self.embed_dim))
+        self.b = nn.Parameter(torch.Tensor(self.embed_dim))
+        self.reset_parameters()
 
         # use layerNorm rather than FusedLayerNorm for exporting.
         # char_inputs can be used to determint this.
@@ -1481,6 +1510,13 @@ class TransformerDecoderLayer(nn.Module):
 
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.w)
+        nn.init.xavier_uniform_(self.u)
+        tmp = torch.Tensor(1,self.embed_dim)
+        nn.init.xavier_normal_(tmp)
+        self.b.data = tmp.squeeze(0)
 
     def forward(
         self,
@@ -1557,8 +1593,12 @@ class TransformerDecoderLayer(nn.Module):
             #x3 = torch.cat((x1,x2),2)
             #x3 = self.activation_fn(self.fc_d(x3))
             #x3 = F.dropout(x3,p=self.activation_dropout,training=self.training)
-            ratios = self.get_ratio()
-            x = residual + ratios[0] * x1 + ratios[1] * x2
+            g1 = F.linear(x1, self.w)
+            g2 = F.linear(x2, self.u)
+            g = torch.sigmoid(g1 + g2 + self.b)
+            x3 = torch.mul(g, x1) + torch.mul((1. - g), x2)
+            #ratios = self.get_ratio()
+            x = residual + x3
             x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, after=True)
 
         residual = x

@@ -196,7 +196,7 @@ class FairseqEncoderDecoderModel(BaseFairseqModel):
         self.mask_cls_sep = mask_cls_sep
         self.bert_output_layer = getattr(args, 'bert_output_layer', -1)
         # outdim = self.encoder.layers[0].embed_dim
-        # indim = self.bert_encoder.encoder.hidden_size
+        # indim = self.bert_encoder.hidden_size
         # if not outdim == indim:
         #     self.trans_weight = Parameter(torch.Tensor(outdim, indim))
         #     bias = False
@@ -204,12 +204,20 @@ class FairseqEncoderDecoderModel(BaseFairseqModel):
         #         self.trans_bias = Parameter(torch.Tensor(outdim))
         #     else:
         #         self.trans_bias = None
+        # self.w = Parameter(torch.Tensor(outdim, outdim))
+        # self.u = Parameter(torch.Tensor(outdim, outdim))
+        # self.b = Parameter(torch.Tensor(outdim))
         # self.reset_parameters()
         assert isinstance(self.encoder, FairseqEncoder)
         assert isinstance(self.decoder, FairseqDecoder)
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.trans_weight)
+        nn.init.xavier_uniform_(self.w)
+        nn.init.xavier_uniform_(self.u)
+        tmp = torch.Tensor(1,self.encoder.layers[0].embed_dim)
+        nn.init.xavier_normal_(tmp)
+        self.b.data = tmp.squeeze(0)
         if self.trans_bias is not None:
             nn.init.constant_(self.trans_bias, 0.)
 
